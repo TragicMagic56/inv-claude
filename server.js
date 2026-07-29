@@ -22,6 +22,7 @@ async function handleGetClients(req, res) {
     const discovery = await discoverClients();
     res.json(discovery);
   } catch (error) {
+    console.error('GET /api/clients failed:', error);
     res.status(500).json({ error: error.message });
   }
 }
@@ -36,6 +37,7 @@ async function handleSetRate(req, res) {
     setRate(toggl_client_id, numericRate);
     res.json({ ok: true });
   } catch (error) {
+    console.error('POST /api/rates failed:', error);
     res.status(500).json({ error: error.message });
   }
 }
@@ -46,6 +48,7 @@ async function handlePreview(req, res) {
     const result = await computeBilling(toggl_client_id, start_date, end_date);
     res.json(result);
   } catch (error) {
+    console.error('POST /api/preview failed:', error);
     res.status(400).json({ error: error.message });
   }
 }
@@ -108,6 +111,7 @@ async function handleCreateDraftInvoice(req, res) {
       wave_invoice_url: invoice.viewUrl || null,
     });
   } catch (error) {
+    console.error('POST /api/create-draft-invoice failed:', error);
     res.status(400).json({ error: error.message });
   }
 }
