@@ -1,0 +1,4 @@
+node_modules/
+.env
+client-config.json
+invoiced_entries.json

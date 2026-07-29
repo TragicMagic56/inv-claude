@@ -1,0 +1,27 @@
+{
+  "clients": [
+    {
+      "id": "version",
+      "display_name": "VERSION",
+      "toggl_client_id": 123456,
+      "toggl_workspace_id": 7890123,
+      "wave_customer_id": "customer_abc123",
+      "rate_per_hour": 95,
+      "projects": {
+        "111222": "product_narrewarrensouth",
+        "333444": "product_someotherproject"
+      }
+    },
+    {
+      "id": "acme",
+      "display_name": "Acme Pty Ltd",
+      "toggl_client_id": 654321,
+      "toggl_workspace_id": 7890123,
+      "wave_customer_id": "customer_def456",
+      "rate_per_hour": 110,
+      "projects": {
+        "555666": "product_acmewebsite"
+      }
+    }
+  ]
+}

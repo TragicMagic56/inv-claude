@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Toggl to Wave Invoice Generator</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 720px;
+    margin: 40px auto;
+    padding: 0 20px;
+    color: #1a1a1a;
+  }
+  h1 { font-size: 20px; }
+  label { display: block; margin-top: 14px; font-weight: 600; font-size: 13px; }
+  select, input {
+    width: 100%;
+    padding: 8px;
+    margin-top: 4px;
+    font-size: 14px;
+    box-sizing: border-box;
+  }
+  .row { display: flex; gap: 16px; }
+  .row > div { flex: 1; }
+  button {
+    margin-top: 18px;
+    padding: 10px 16px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  #createButton { margin-left: 10px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 18px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd; font-size: 13px; }
+  th { font-size: 12px; text-transform: uppercase; color: #555; }
+  .totals { text-align: right; font-weight: 600; margin-top: 10px; }
+  .warning {
+    background: #fff4e5;
+    border: 1px solid #f0c36d;
+    padding: 10px 12px;
+    margin-top: 14px;
+    font-size: 13px;
+  }
+  .error {
+    background: #fdeaea;
+    border: 1px solid #e88;
+    padding: 10px 12px;
+    margin-top: 14px;
+    font-size: 13px;
+  }
+  .success {
+    background: #e9f7ef;
+    border: 1px solid #7ec594;
+    padding: 10px 12px;
+    margin-top: 14px;
+    font-size: 13px;
+  }
+  #resultArea { margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<h1>Toggl to Wave Invoice Generator</h1>
+
+<label for="clientSelect">Client</label>
+<select id="clientSelect"></select>
+
+<div class="row">
+  <div>
+    <label for="startDate">Start date</label>
+    <input type="date" id="startDate">
+  </div>
+  <div>
+    <label for="endDate">End date</label>
+    <input type="date" id="endDate">
+  </div>
+</div>
+
+<button id="previewButton">Preview</button>
+<button id="createButton" disabled>Create Draft Invoice</button>
+
+<div id="resultArea"></div>
+
+<script>
+  const clientSelect = document.getElementById('clientSelect');
+  const startDateInput = document.getElementById('startDate');
+  const endDateInput = document.getElementById('endDate');
+  const previewButton = document.getElementById('previewButton');
+  const createButton = document.getElementById('createButton');
+  const resultArea = document.getElementById('resultArea');
+
+  let lastPreviewHadLineItems = false;
+
+  async function loadClients() {
+    const response = await fetch('/api/clients');
+    const clients = await response.json();
+    clientSelect.innerHTML = clients
+      .map((client) => `<option value="${client.id}">${client.display_name}</option>`)
+      .join('');
+  }
+
+  function clearResult() {
+    resultArea.innerHTML = '';
+  }
+
+  function showError(message) {
+    resultArea.innerHTML = `<div class="error">${message}</div>`;
+  }
+
+  function renderPreview(data) {
+    let html = '';
+
+    if (data.line_items.length === 0) {
+      html += `<div class="warning">No billable time found for this client and date range.</div>`;
+    } else {
+      html += '<table><thead><tr><th>Project</th><th>Hours</th><th>Rate</th><th>Amount</th></tr></thead><tbody>';
+      for (const item of data.line_items) {
+        html += `<tr><td>${item.project_name}</td><td>${item.hours}</td><td>$${item.rate_per_hour}/hr</td><td>$${item.amount.toFixed(2)}</td></tr>`;
+      }
+      html += '</tbody></table>';
+      html += `<div class="totals">Total: $${data.total.toFixed(2)}</div>`;
+    }
+
+    if (data.unmapped_warnings.length > 0) {
+      const list = data.unmapped_warnings
+        .map((warning) => `${warning.project_name} (${warning.hours} hrs)`)
+        .join(', ');
+      html += `<div class="warning">These projects have tracked time but no Wave product mapped in client-config.json, so they are excluded from the total: ${list}</div>`;
+    }
+
+    resultArea.innerHTML = html;
+  }
+
+  previewButton.addEventListener('click', async () => {
+    clearResult();
+    createButton.disabled = true;
+    lastPreviewHadLineItems = false;
+
+    const body = {
+      client_id: clientSelect.value,
+      start_date: startDateInput.value,
+      end_date: endDateInput.value,
+    };
+
+    if (!body.client_id || !body.start_date || !body.end_date) {
+      showError('Choose a client and both dates first.');
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        showError(data.error || 'Preview failed.');
+        return;
+      }
+
+      renderPreview(data);
+      lastPreviewHadLineItems = data.line_items.length > 0;
+      createButton.disabled = !lastPreviewHadLineItems;
+    } catch (error) {
+      showError(`Preview request failed: ${error.message}`);
+    }
+  });
+
+  createButton.addEventListener('click', async () => {
+    if (!lastPreviewHadLineItems) return;
+    createButton.disabled = true;
+
+    const body = {
+      client_id: clientSelect.value,
+      start_date: startDateInput.value,
+      end_date: endDateInput.value,
+    };
+
+    try {
+      const response = await fetch('/api/create-draft-invoice', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        showError(data.error || 'Creating the draft invoice failed.');
+        createButton.disabled = false;
+        return;
+      }
+
+      let html = `<div class="success">Draft invoice created in Wave (invoice ${data.wave_invoice_number || data.wave_invoice_id}).`;
+      if (data.wave_invoice_url) {
+        html += ` <a href="${data.wave_invoice_url}" target="_blank" rel="noopener">Open in Wave</a>`;
+      } else {
+        html += ' Open Wave and find it by invoice number to review and send.';
+      }
+      html += '</div>';
+
+      if (data.ledger_warning) {
+        html += `<div class="warning">${data.ledger_warning}</div>`;
+      }
+
+      resultArea.innerHTML = html;
+      lastPreviewHadLineItems = false;
+    } catch (error) {
+      showError(`Creating the draft invoice failed: ${error.message}`);
+      createButton.disabled = false;
+    }
+  });
+
+  loadClients();
+</script>
+
+</body>
+</html>
