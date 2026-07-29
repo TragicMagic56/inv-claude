@@ -2,23 +2,39 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 
-const { loadClientConfig, getClientById } = require('./lib/config');
-const { getTimeEntries, getProjects } = require('./lib/toggl');
-const { createDraftInvoice } = require('./lib/wave');
+const { getTimeEntries, getProjects, getWorkspaces, getClients } = require('./lib/toggl');
+const { createDraftInvoice, getCustomers, getProducts, getIncomeAccounts, createProduct } = require('./lib/wave');
 const { getInvoicedEntryIdSet, appendInvoicedEntries } = require('./lib/ledger');
+const { getRate, setRate } = require('./lib/rates');
+const { matchByName } = require('./lib/matching');
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/clients', handleGetClients);
+app.post('/api/rates', handleSetRate);
 app.post('/api/preview', handlePreview);
 app.post('/api/create-draft-invoice', handleCreateDraftInvoice);
 
 async function handleGetClients(req, res) {
   try {
-    const clients = loadClientConfig();
-    res.json(clients.map((client) => ({ id: client.id, display_name: client.display_name })));
+    const discovery = await discoverClients();
+    res.json(discovery);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}
+
+async function handleSetRate(req, res) {
+  try {
+    const { toggl_client_id, rate } = req.body;
+    const numericRate = Number(rate);
+    if (!toggl_client_id || !Number.isFinite(numericRate) || numericRate <= 0) {
+      return res.status(400).json({ error: 'toggl_client_id and a positive rate are required.' });
+    }
+    setRate(toggl_client_id, numericRate);
+    res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -26,8 +42,8 @@ async function handleGetClients(req, res) {
 
 async function handlePreview(req, res) {
   try {
-    const { client_id, start_date, end_date } = req.body;
-    const result = await computeBilling(client_id, start_date, end_date);
+    const { toggl_client_id, start_date, end_date } = req.body;
+    const result = await computeBilling(toggl_client_id, start_date, end_date);
     res.json(result);
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -36,35 +52,44 @@ async function handlePreview(req, res) {
 
 async function handleCreateDraftInvoice(req, res) {
   try {
-    const { client_id, start_date, end_date } = req.body;
-    const client = getClientById(client_id);
-    if (!client) {
-      return res.status(400).json({ error: `Unknown client_id "${client_id}".` });
-    }
+    const { toggl_client_id, start_date, end_date } = req.body;
 
     // Recompute fresh right before creating, never trust client-supplied
-    // line items, so what's billed always matches current ledger/Toggl state.
-    const billing = await computeBilling(client_id, start_date, end_date);
+    // line items, so what's billed always matches current ledger/Toggl/Wave state.
+    const billing = await computeBilling(toggl_client_id, start_date, end_date);
 
     if (billing.line_items.length === 0) {
       return res.status(400).json({ error: 'Nothing to bill for this client and date range.' });
+    }
+
+    const itemsNeedingNewProduct = billing.line_items.filter((item) => item.will_create_product);
+    if (itemsNeedingNewProduct.length > 0) {
+      const incomeAccountId = await resolveIncomeAccountId();
+      for (const item of itemsNeedingNewProduct) {
+        const product = await createProduct({
+          businessId: process.env.WAVE_BUSINESS_ID,
+          name: item.project_name,
+          incomeAccountId,
+        });
+        item.wave_product_id = product.id;
+      }
     }
 
     const wave_items = billing.line_items.map((item) => ({
       productId: item.wave_product_id,
       description: item.description,
       quantity: item.hours,
-      unitPrice: client.rate_per_hour,
+      unitPrice: item.rate_per_hour,
     }));
 
-    const invoice = await createDraftInvoice(process.env.WAVE_BUSINESS_ID, client.wave_customer_id, wave_items);
+    const invoice = await createDraftInvoice(process.env.WAVE_BUSINESS_ID, billing.wave_customer_id, wave_items);
 
     try {
-      appendInvoicedEntries(client_id, invoice.id, billing.included_entry_ids);
+      appendInvoicedEntries(billing.client_id, invoice.id, billing.included_entry_ids);
     } catch (ledgerError) {
       console.error('=====================================================');
       console.error('LEDGER WRITE FAILED AFTER A SUCCESSFUL WAVE INVOICE.');
-      console.error(`Wave invoice ${invoice.id} was created for client "${client_id}".`);
+      console.error(`Wave invoice ${invoice.id} was created for toggl_client_id "${billing.client_id}".`);
       console.error('The following Toggl entry IDs were NOT recorded and must be added to invoiced_entries.json by hand to avoid double billing:');
       console.error(JSON.stringify(billing.included_entry_ids));
       console.error(ledgerError);
@@ -87,19 +112,96 @@ async function handleCreateDraftInvoice(req, res) {
   }
 }
 
-async function computeBilling(clientId, startDate, endDate) {
-  if (!startDate || !endDate) {
-    throw new Error('start_date and end_date are required.');
+// Fetches Toggl clients and Wave customers live, matches them by name, and
+// merges in any locally saved rate. No mapping is ever hand maintained.
+async function discoverClients() {
+  const businessId = process.env.WAVE_BUSINESS_ID;
+  const workspaces = await getWorkspaces();
+
+  const togglClients = [];
+  for (const workspace of workspaces) {
+    const clients = await getClients(workspace.id);
+    for (const client of clients) {
+      togglClients.push({ id: client.id, name: client.name, workspace_id: workspace.id });
+    }
   }
 
-  const client = getClientById(clientId);
-  if (!client) {
-    throw new Error(`Unknown client_id "${clientId}".`);
+  const waveCustomers = await getCustomers(businessId);
+
+  const ready = [];
+  const needs_setup = [];
+
+  for (const client of togglClients) {
+    const { match, reason } = matchByName(client.name, waveCustomers);
+
+    if (!match) {
+      needs_setup.push({
+        toggl_client_id: client.id,
+        display_name: client.name,
+        issue: reason === 'ambiguous_match' ? 'ambiguous_wave_customer_match' : 'no_wave_customer_match',
+      });
+      continue;
+    }
+
+    const rate = getRate(client.id);
+    if (rate === undefined) {
+      needs_setup.push({ toggl_client_id: client.id, display_name: client.name, issue: 'rate_not_set' });
+      continue;
+    }
+
+    ready.push({
+      toggl_client_id: client.id,
+      workspace_id: client.workspace_id,
+      display_name: client.name,
+      wave_customer_id: match.id,
+      rate,
+    });
   }
 
-  const [timeEntries, projects] = await Promise.all([
+  return { ready, needs_setup };
+}
+
+function resolveClient(togglClientId, discovery) {
+  const id = Number(togglClientId);
+  const ready = discovery.ready.find((client) => client.toggl_client_id === id);
+  if (ready) return ready;
+
+  const blocked = discovery.needs_setup.find((client) => client.toggl_client_id === id);
+  if (blocked) {
+    const messages = {
+      no_wave_customer_match: 'no Wave customer matches this Toggl client\'s name',
+      ambiguous_wave_customer_match: 'more than one Wave customer matches this Toggl client\'s name',
+      rate_not_set: 'no rate is set for this client yet, set one on the Rates panel',
+    };
+    throw new Error(`Cannot bill "${blocked.display_name}": ${messages[blocked.issue]}.`);
+  }
+
+  throw new Error(`Unknown toggl_client_id "${togglClientId}".`);
+}
+
+async function resolveIncomeAccountId() {
+  if (process.env.WAVE_INCOME_ACCOUNT_ID) {
+    return process.env.WAVE_INCOME_ACCOUNT_ID;
+  }
+  const incomeAccounts = await getIncomeAccounts(process.env.WAVE_BUSINESS_ID);
+  if (incomeAccounts.length === 0) {
+    throw new Error('No active income account found in Wave to assign a new product to. Set WAVE_INCOME_ACCOUNT_ID in .env.');
+  }
+  return incomeAccounts[0].id;
+}
+
+async function computeBilling(togglClientId, startDate, endDate) {
+  if (!togglClientId || !startDate || !endDate) {
+    throw new Error('toggl_client_id, start_date and end_date are required.');
+  }
+
+  const discovery = await discoverClients();
+  const client = resolveClient(togglClientId, discovery);
+
+  const [timeEntries, projects, products] = await Promise.all([
     getTimeEntries(startDate, endDate),
-    getProjects(client.toggl_workspace_id),
+    getProjects(client.workspace_id),
+    getProducts(process.env.WAVE_BUSINESS_ID),
   ]);
 
   const clientProjects = projects.filter((project) => project.client_id === client.toggl_client_id);
@@ -118,8 +220,7 @@ async function computeBilling(clientId, startDate, endDate) {
   const secondsByProject = new Map();
   const entryIdsByProject = new Map();
   for (const entry of matchingEntries) {
-    const prior = secondsByProject.get(entry.project_id) || 0;
-    secondsByProject.set(entry.project_id, prior + entry.duration);
+    secondsByProject.set(entry.project_id, (secondsByProject.get(entry.project_id) || 0) + entry.duration);
 
     const priorIds = entryIdsByProject.get(entry.project_id) || [];
     priorIds.push(entry.id);
@@ -135,14 +236,11 @@ async function computeBilling(clientId, startDate, endDate) {
   for (const [projectId, totalSeconds] of secondsByProject.entries()) {
     const hours = roundToNearestMinuteAsHours(totalSeconds);
     const projectName = projectNameById.get(projectId) || `Project ${projectId}`;
-    const wave_product_id = client.projects[String(projectId)];
 
-    if (!wave_product_id) {
-      unmapped_warnings.push({
-        toggl_project_id: projectId,
-        project_name: projectName,
-        hours,
-      });
+    const { match, reason } = matchByName(projectName, products);
+
+    if (reason === 'ambiguous_match') {
+      unmapped_warnings.push({ toggl_project_id: projectId, project_name: projectName, hours, reason });
       continue;
     }
 
@@ -150,10 +248,11 @@ async function computeBilling(clientId, startDate, endDate) {
       toggl_project_id: projectId,
       project_name: projectName,
       hours,
-      rate_per_hour: client.rate_per_hour,
-      amount: round2(hours * client.rate_per_hour),
-      wave_product_id,
-      description: `${projectName}, ${dateRangeLabel}, ${hours} hrs at $${client.rate_per_hour}/hr`,
+      rate_per_hour: client.rate,
+      amount: round2(hours * client.rate),
+      wave_product_id: match ? match.id : null,
+      will_create_product: !match,
+      description: `${projectName}, ${dateRangeLabel}, ${hours} hrs at $${client.rate}/hr`,
     });
 
     included_entry_ids.push(...entryIdsByProject.get(projectId));
@@ -162,8 +261,9 @@ async function computeBilling(clientId, startDate, endDate) {
   const subtotal = round2(line_items.reduce((sum, item) => sum + item.amount, 0));
 
   return {
-    client_id: clientId,
+    client_id: client.toggl_client_id,
     client_display_name: client.display_name,
+    wave_customer_id: client.wave_customer_id,
     line_items,
     unmapped_warnings,
     subtotal,

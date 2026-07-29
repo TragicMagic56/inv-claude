@@ -12,6 +12,7 @@
     color: #1a1a1a;
   }
   h1 { font-size: 20px; }
+  h2 { font-size: 15px; margin-top: 28px; }
   label { display: block; margin-top: 14px; font-weight: 600; font-size: 13px; }
   select, input {
     width: 100%;
@@ -34,6 +35,7 @@
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd; font-size: 13px; }
   th { font-size: 12px; text-transform: uppercase; color: #555; }
   .totals { text-align: right; font-weight: 600; margin-top: 10px; }
+  .new-product-note { color: #8a6d1a; font-size: 12px; }
   .warning {
     background: #fff4e5;
     border: 1px solid #f0c36d;
@@ -56,6 +58,18 @@
     font-size: 13px;
   }
   #resultArea { margin-top: 10px; }
+  .setup-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    border-bottom: 1px solid #eee;
+    font-size: 13px;
+  }
+  .setup-row .name { flex: 1; }
+  .setup-row .issue { color: #8a6d1a; }
+  .setup-row input[type="number"] { width: 90px; margin-top: 0; }
+  .setup-row button { margin-top: 0; padding: 6px 10px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -81,6 +95,9 @@
 
 <div id="resultArea"></div>
 
+<h2>Needs setup</h2>
+<div id="needsSetupArea"></div>
+
 <script>
   const clientSelect = document.getElementById('clientSelect');
   const startDateInput = document.getElementById('startDate');
@@ -88,15 +105,86 @@
   const previewButton = document.getElementById('previewButton');
   const createButton = document.getElementById('createButton');
   const resultArea = document.getElementById('resultArea');
+  const needsSetupArea = document.getElementById('needsSetupArea');
 
   let lastPreviewHadLineItems = false;
 
+  const ISSUE_LABELS = {
+    no_wave_customer_match: 'No Wave customer matches this name',
+    ambiguous_wave_customer_match: 'More than one Wave customer matches this name',
+    rate_not_set: 'No rate set yet',
+  };
+
   async function loadClients() {
     const response = await fetch('/api/clients');
-    const clients = await response.json();
-    clientSelect.innerHTML = clients
-      .map((client) => `<option value="${client.id}">${client.display_name}</option>`)
+    const discovery = await response.json();
+
+    clientSelect.innerHTML = discovery.ready
+      .map((client) => `<option value="${client.toggl_client_id}">${client.display_name}</option>`)
       .join('');
+
+    renderNeedsSetup(discovery.needs_setup);
+  }
+
+  function renderNeedsSetup(entries) {
+    if (entries.length === 0) {
+      needsSetupArea.innerHTML = '<div style="font-size: 13px; color: #666;">Nothing needs attention.</div>';
+      return;
+    }
+
+    needsSetupArea.innerHTML = entries
+      .map((entry) => {
+        if (entry.issue === 'rate_not_set') {
+          return `
+            <div class="setup-row" data-client-id="${entry.toggl_client_id}">
+              <span class="name">${entry.display_name}</span>
+              <span class="issue">${ISSUE_LABELS[entry.issue]}</span>
+              <input type="number" step="0.01" min="0" placeholder="Rate per hour">
+              <button class="save-rate-button">Save</button>
+            </div>
+          `;
+        }
+        return `
+          <div class="setup-row">
+            <span class="name">${entry.display_name}</span>
+            <span class="issue">${ISSUE_LABELS[entry.issue] || entry.issue}</span>
+          </div>
+        `;
+      })
+      .join('');
+
+    needsSetupArea.querySelectorAll('.save-rate-button').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const row = button.closest('.setup-row');
+        const togglClientId = row.getAttribute('data-client-id');
+        const rateInput = row.querySelector('input');
+        const rate = Number(rateInput.value);
+
+        if (!rate || rate <= 0) {
+          rateInput.focus();
+          return;
+        }
+
+        button.disabled = true;
+        try {
+          const response = await fetch('/api/rates', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ toggl_client_id: togglClientId, rate }),
+          });
+          if (!response.ok) {
+            const data = await response.json();
+            showError(data.error || 'Saving the rate failed.');
+            button.disabled = false;
+            return;
+          }
+          await loadClients();
+        } catch (error) {
+          showError(`Saving the rate failed: ${error.message}`);
+          button.disabled = false;
+        }
+      });
+    });
   }
 
   function clearResult() {
@@ -115,7 +203,10 @@
     } else {
       html += '<table><thead><tr><th>Project</th><th>Hours</th><th>Rate</th><th>Amount</th></tr></thead><tbody>';
       for (const item of data.line_items) {
-        html += `<tr><td>${item.project_name}</td><td>${item.hours}</td><td>$${item.rate_per_hour}/hr</td><td>$${item.amount.toFixed(2)}</td></tr>`;
+        const note = item.will_create_product
+          ? '<div class="new-product-note">A new Wave product will be created for this project</div>'
+          : '';
+        html += `<tr><td>${item.project_name}${note}</td><td>${item.hours}</td><td>$${item.rate_per_hour}/hr</td><td>$${item.amount.toFixed(2)}</td></tr>`;
       }
       html += '</tbody></table>';
       html += `<div class="totals">Total: $${data.total.toFixed(2)}</div>`;
@@ -125,7 +216,7 @@
       const list = data.unmapped_warnings
         .map((warning) => `${warning.project_name} (${warning.hours} hrs)`)
         .join(', ');
-      html += `<div class="warning">These projects have tracked time but no Wave product mapped in client-config.json, so they are excluded from the total: ${list}</div>`;
+      html += `<div class="warning">More than one Wave product matches these project names, so they are excluded from the total until the naming is unambiguous: ${list}</div>`;
     }
 
     resultArea.innerHTML = html;
@@ -137,12 +228,12 @@
     lastPreviewHadLineItems = false;
 
     const body = {
-      client_id: clientSelect.value,
+      toggl_client_id: clientSelect.value,
       start_date: startDateInput.value,
       end_date: endDateInput.value,
     };
 
-    if (!body.client_id || !body.start_date || !body.end_date) {
+    if (!body.toggl_client_id || !body.start_date || !body.end_date) {
       showError('Choose a client and both dates first.');
       return;
     }
@@ -173,7 +264,7 @@
     createButton.disabled = true;
 
     const body = {
-      client_id: clientSelect.value,
+      toggl_client_id: clientSelect.value,
       start_date: startDateInput.value,
       end_date: endDateInput.value,
     };
