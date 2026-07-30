@@ -1,66 +1,88 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Invoicing
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Self hosted invoicing app, replacing the invoicing side of Wave. Single user
+(owner only). Track time against client projects, generate invoices from
+unbilled time, mark them paid by hand. No payment processor.
 
-## About Laravel
+## Stack
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- Laravel 11, PHP 8.2+, MySQL
+- Laravel Breeze for session based auth
+- Blade + Tailwind, Alpine.js for the timer and dynamic line items
+- Dompdf for PDF export (pure PHP, so it works on shared or cPanel hosting)
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+Because Dompdf will be doing the rendering, invoice templates use simple table
+based CSS. No flexbox, no grid.
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+## Local setup
 
-## Learning Laravel
+Requires PHP 8.2+, Composer, Node and a MySQL or MariaDB server.
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+```bash
+composer install
+npm install
+cp .env.example .env
+php artisan key:generate
+```
 
-You may also try the [Laravel Bootcamp](https://bootcamp.laravel.com), where you will be guided through building a modern Laravel application from scratch.
+Create the database:
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+```sql
+CREATE DATABASE invoicing CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'invoicing'@'localhost' IDENTIFIED BY 'your-password';
+GRANT ALL PRIVILEGES ON invoicing.* TO 'invoicing'@'localhost';
+```
 
-## Laravel Sponsors
+Set `DB_DATABASE`, `DB_USERNAME` and `DB_PASSWORD` in `.env`, then set the owner
+account that gets seeded:
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+```
+OWNER_NAME="Your Name"
+OWNER_EMAIL=you@example.com
+OWNER_PASSWORD=pick-something
+```
 
-### Premium Partners
+Then migrate, seed the owner and build the assets:
 
-- **[Vehikl](https://vehikl.com/)**
-- **[Tighten Co.](https://tighten.co)**
-- **[WebReinvent](https://webreinvent.com/)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel/)**
-- **[Cyber-Duck](https://cyber-duck.co.uk)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Jump24](https://jump24.co.uk)**
-- **[Redberry](https://redberry.international/laravel/)**
-- **[Active Logic](https://activelogic.com)**
-- **[byte5](https://byte5.de)**
-- **[OP.GG](https://op.gg)**
+```bash
+php artisan migrate
+php artisan db:seed
+npm run build      # or: npm run dev
+php artisan serve
+```
 
-## Contributing
+Log in at `/login` with the `OWNER_*` credentials.
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+### A note on registration
 
-## Code of Conduct
+Public registration is switched off. Records are not scoped per user, so any
+account that could register would see every client, time entry and invoice. The
+owner is created by the seeder instead. `RegisteredUserController` is still
+present, and the two commented routes at the top of `routes/auth.php` are all
+that need re-enabling if more users are ever wanted.
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+## Tests
 
-## Security Vulnerabilities
+```bash
+php artisan test
+```
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+Tests run against sqlite in memory, configured in `phpunit.xml`, so they never
+touch the development database.
 
-## License
+## Build phases
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+| Phase | Scope | Status |
+| --- | --- | --- |
+| 1 | Foundation: auth, migrations, dashboard shell | Done |
+| 2 | Clients and projects CRUD | To do |
+| 3 | Time tracking, timer and manual entry | To do |
+| 4 | Invoice creation from unbilled time | To do |
+| 5 | Templates, branding, PDF export | To do |
+| 6 | Status, payments, dashboard figures | To do |
+
+## Out of scope for v1
+
+Payment gateways, multi user roles, recurring invoices, multi currency, a client
+facing portal, automatic emails or reminders, and a drag and drop template
+builder. v1 ships a few preset invoice layouts only.
